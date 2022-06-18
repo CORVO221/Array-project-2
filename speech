@@ -1,0 +1,186 @@
+clc
+clear
+%% load speech signals
+[s1,fs1]=audioread('clean_speech.wav');
+[s2,fs2]=audioread('clean_speech_2.wav');
+[n1,fs3]=audioread('babble_noise.wav');
+[n2,fs4]=audioread('aritificial_nonstat_noise.wav');
+[n3,fs5]=audioread('Speech_shaped_noise.wav');
+load('impulse_responses');
+%% Model construction
+% clean speech1 received
+x1(1,:)=conv(s1,h_target(1,:));
+x1(2,:)=conv(s1,h_target(2,:));
+x1(3,:)=conv(s1,h_target(3,:));
+x1(4,:)=conv(s1,h_target(4,:));
+% clean speech2 received
+x2(1,:)=conv(s2,h_inter1(1,:));
+x2(2,:)=conv(s2,h_inter1(2,:));
+x2(3,:)=conv(s2,h_inter1(3,:));
+x2(4,:)=conv(s2,h_inter1(4,:));
+% babble noise received
+N1(1,:)=conv(n1,h_inter2(1,:));
+N1(2,:)=conv(n1,h_inter2(2,:));
+N1(3,:)=conv(n1,h_inter2(3,:));
+N1(4,:)=conv(n1,h_inter2(4,:));
+% aritificial nonstationary noise received
+N2(1,:)=conv(n2,h_inter3(1,:));
+N2(2,:)=conv(n2,h_inter3(2,:));
+N2(3,:)=conv(n2,h_inter3(3,:));
+N2(4,:)=conv(n2,h_inter3(4,:));
+% stationary speechshaped noise received
+N3(1,:)=conv(n3,h_inter4(1,:));
+N3(2,:)=conv(n3,h_inter4(2,:));
+N3(3,:)=conv(n3,h_inter4(3,:));
+N3(4,:)=conv(n3,h_inter4(4,:));
+
+% signal length
+NL=1000000;
+x1=[x1 zeros(4,NL-length(x1))];
+x2=[x2 zeros(4,NL-length(x2))];
+N1=[N1 zeros(4,NL-length(N1))];
+N2=[N2 zeros(4,NL-length(N2))];
+N3=N3(:,1:NL);
+
+% received signal x
+x=x1+x2+N1+N2+N3;
+
+%% segmentation and stft
+
+% frame length
+NF=200;
+% overlap length
+NOP=100;
+% number of frames 
+NK=9999;
+% hann window
+w=hann(NF)';
+w=[w;w;w;w];
+
+% seg 
+xseg=zeros(4,NF,NK);
+xw=zeros(4,NF,NK);
+XW=zeros(4,NF,NK);
+for i=1:NK
+    xseg(:,:,i)=x(:,(i-1)*(NF-NOP)+1:(i-1)*(NF-NOP)+NF);
+% add window
+    xw(:,:,i)=xseg(:,:,i).*w;
+% stft
+    for m=1:4
+    XW(m,:,i)=fft(xw(m,:,i));
+    end
+    
+
+end
+%% Estimation Rx, Rn, Rs, a
+% estimate Rx
+Rx=zeros(4,4,NF);
+rx=zeros(4,4,NF);
+% estimate Rx for each time frame
+for j=1:NK
+for i=1:NF
+rx(:,:,i)=XW(:,i,j)*XW(:,i,j)';
+end
+Rx=Rx+rx;
+end
+Rx=Rx/NK;
+
+% estimate Rn
+% use 78 frames to estimate
+NN=78;
+Rn=zeros(4,4,NF);
+rn=zeros(4,4,NF);
+for j=1:NN
+for i=1:NF
+rn(:,:,i)=XW(:,i,j)*XW(:,i,j)';
+end
+Rn=Rn+rn;
+end
+Rn=Rn/NN;
+
+% estimate Rs
+u=zeros(4,4,NF);
+lamda=zeros(4,4,NF);
+u1=zeros(4,4,NF);
+lamda1=zeros(4,4,NF);
+Rs=zeros(4,4,NF);
+a=zeros(4,1,NF);
+sig2=zeros(1,NF);
+for i=1:NF
+[u(:,:,i),lamda(:,:,i)]=eig(inv(Rn(:,:,i))*Rx(:,:,i));
+% sort
+[d,ind] = sort(diag(lamda(:,:,i)));
+lam=lamda(:,:,i);
+uu=u(:,:,i);
+lamda1(:,:,i)= lam(ind,ind);
+u1(:,:,i)=uu(:,ind);
+q=inv(u1(:,:,i)');
+a(:,:,i)=q(:,4)/q(1,4);
+Rs(:,:,i)=q(:,4)*(lamda1(4,4,i))*q(:,4)';
+sig2(i)=lamda1(4,4,i)*q(1,4)*q(1,4)';
+end
+
+%% MVDR beamformer
+wmvdr=zeros(4,NF);
+for i=1:NF
+    wmvdr(:,i)=inv(Rn(:,:,i))*a(:,:,i)*inv(a(:,:,i)'*inv(Rn(:,:,i))*a(:,:,i));
+end
+Sh=zeros(1,NF,NK);
+% filtering
+for i=1:NK
+for j=1:NF
+   Sh(:,j,i)=wmvdr(:,j)'*XW(:,j,i);
+end
+end
+
+% ifft
+sh=zeros(1,NF,NK);
+for i=1:NK
+    sh(1,:,i)=ifft(Sh(1,:,i));
+end
+
+% recover
+se=zeros(1,1000000);
+for i=1:NK
+    se=se+[zeros(1,(i-1)*100) sh(1,:,i) zeros(1,999800-(i-1)*100)];
+end
+se_enhance=10*se;
+
+
+%% Wiener beamformer
+wiener=zeros(4,NF);
+for i=1:NF
+     wiener(:,i)=sig2(i)/(sig2(i)+inv(a(:,:,i)'*inv(Rn(:,:,i))*a(:,:,i)))*inv(Rx(:,:,i))*a(:,:,i)*inv(a(:,:,i)'*inv(Rx(:,:,i))*a(:,:,i));
+end
+Sh1=zeros(1,NF,NK);
+% filtering
+for i=1:NK
+for j=1:NF
+   Sh1(:,j,i)=wiener(:,j)'*XW(:,j,i);
+end
+end
+
+% ifft
+sh1=zeros(1,NF,NK);
+for i=1:NK
+    sh1(1,:,i)=ifft(Sh1(1,:,i));
+end
+
+% recover
+se1=zeros(1,1000000);
+for i=1:NK
+    se1=se1+[zeros(1,(i-1)*100) sh1(1,:,i) zeros(1,999800-(i-1)*100)];
+end
+se_enhance1=10*se1;
+
+subplot(4,1,1);plot(x1(1,1:500000));title('clean speech');
+subplot(4,1,2);plot(x(1,1:500000));title('noisy speech (first microphone)');
+subplot(4,1,3);plot(se(1:500000));title('MVDR beamforming');
+subplot(4,1,4);plot(se1(1:500000));title('Wiener beamforming');
+
+%% evaluation
+
+STOI1 = stoi(x1(1,:), se, fs1);
+STOI2 = stoi(x1(1,:), se1, fs1);
+
+
